@@ -1,0 +1,6 @@
+{
+  "name": "TataSwap",
+  "description": "Permissionless decentralized cryptocurrency exchange with on-chain listing fee collection, AMM swaps, and multi-chain liquidity pools.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
