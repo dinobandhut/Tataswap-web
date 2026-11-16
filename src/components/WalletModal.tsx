@@ -8,6 +8,8 @@ import {
   LogIn,
   LogOut,
   ChevronLeft,
+  Smartphone,
+  AlertTriangle,
 } from 'lucide-react';
 import { useWallet, type WalletType } from '../context/WalletContext';
 import { useAuth } from '../context/AuthContext';
@@ -76,7 +78,7 @@ function WalletIcon({ type }: { type: WalletType }) {
 }
 
 const WALLET_LABEL: Record<WalletType, string> = {
-  trustwallet: 'Trust Wallet Mobile & Extension',
+  trustwallet: 'Trust Wallet',
   walletconnect: 'WalletConnect',
   metamask: 'MetaMask',
   coinbase: 'Coinbase Wallet',
@@ -95,8 +97,11 @@ export function WalletModal() {
     connectWallet,
     disconnectWallet,
     discoveredProviders,
+    isInIframe,
+    isMobileBrowser,
     isConnecting,
     walletError,
+    clearWalletError,
   } = useWallet();
 
   const { user, signInWithGoogle, logout, getIdToken } = useAuth();
@@ -107,6 +112,26 @@ export function WalletModal() {
   const [authError, setAuthError] = useState<string | null>(null);
 
   if (!walletModalOpen) return null;
+
+  const currentUrl = typeof window !== 'undefined' ? window.location.href : '';
+  const strippedUrl = currentUrl.replace(/^https?:\/\//, '');
+
+  const getDeepLink = (type: WalletType) => {
+    switch (type) {
+      case 'trustwallet':
+        return `https://link.trustwallet.com/open_url?coin_id=20000714&url=${encodeURIComponent(
+          currentUrl
+        )}`;
+      case 'metamask':
+        return `https://metamask.app.link/dapp/${strippedUrl}`;
+      case 'coinbase':
+        return `https://go.cb-w.com/dapp?cb_url=${encodeURIComponent(currentUrl)}`;
+      case 'binance':
+        return `https://app.binance.com/cedefi/wc?uri=${encodeURIComponent(currentUrl)}`;
+      default:
+        return currentUrl;
+    }
+  };
 
   const copyAddress = () => {
     if (!account) return;
@@ -138,53 +163,78 @@ export function WalletModal() {
     }
   };
 
-  const currentUrl = typeof window !== 'undefined' ? window.location.href : '';
+  const hasAnyInjected = discoveredProviders.length > 0;
 
   const walletOptions: {
     type: WalletType;
     name: string;
     subtitle: string;
-    onClick: () => void;
+    detected: boolean;
   }[] = [
     {
       type: 'trustwallet',
-      name: 'TataSwap / Trust Mobile',
+      name: 'Trust Wallet Mobile & Extension',
       subtitle: discoveredProviders.some((p) => p.type === 'trustwallet')
-        ? 'Detected in browser'
-        : 'Trust Wallet extension & mobile',
-      onClick: () => connectWallet('trustwallet'),
+        ? 'Detected in browser — click to connect'
+        : isMobileBrowser
+        ? 'Tap to open in Trust Wallet DApp Browser'
+        : 'Trust Wallet extension & mobile app',
+      detected: discoveredProviders.some((p) => p.type === 'trustwallet'),
     },
     {
       type: 'walletconnect',
       name: 'WalletConnect',
-      subtitle: 'Connect mobile wallets via DApp deep link',
-      onClick: () => setShowWalletConnectView(true),
+      subtitle: 'Open directly in any mobile wallet app',
+      detected: false,
     },
     {
       type: 'metamask',
       name: 'MetaMask',
       subtitle: discoveredProviders.some((p) => p.type === 'metamask')
-        ? 'Detected in browser'
+        ? 'Detected in browser — click to connect'
+        : isMobileBrowser
+        ? 'Tap to open in MetaMask Mobile Browser'
         : 'MetaMask browser & mobile wallet',
-      onClick: () => connectWallet('metamask'),
+      detected: discoveredProviders.some((p) => p.type === 'metamask'),
     },
     {
       type: 'coinbase',
       name: 'Coinbase Wallet',
       subtitle: discoveredProviders.some((p) => p.type === 'coinbase')
-        ? 'Detected in browser'
+        ? 'Detected in browser — click to connect'
+        : isMobileBrowser
+        ? 'Tap to open in Coinbase Wallet App'
         : 'Coinbase Wallet extension & mobile',
-      onClick: () => connectWallet('coinbase'),
+      detected: discoveredProviders.some((p) => p.type === 'coinbase'),
     },
     {
       type: 'binance',
       name: 'Binance Wallet',
       subtitle: discoveredProviders.some((p) => p.type === 'binance')
-        ? 'Detected in browser'
-        : 'BNB Smart Chain official Web3 wallet',
-      onClick: () => connectWallet('binance'),
+        ? 'Detected in browser — click to connect'
+        : 'BNB Smart Chain Web3 wallet',
+      detected: discoveredProviders.some((p) => p.type === 'binance'),
     },
   ];
+
+  const handleOptionClick = (type: WalletType) => {
+    clearWalletError();
+    if (type === 'walletconnect') {
+      setShowWalletConnectView(true);
+      return;
+    }
+    const matched = discoveredProviders.find((p) => p.type === type);
+    if (matched || hasAnyInjected) {
+      connectWallet(type, matched?.provider);
+      return;
+    }
+    // No browser extension injected in current frame: show mobile deep-link view or attempt connection + guide
+    if (isMobileBrowser) {
+      setShowWalletConnectView(true);
+      return;
+    }
+    connectWallet(type);
+  };
 
   return (
     <div
@@ -210,7 +260,7 @@ export function WalletModal() {
               {account
                 ? 'Connected wallet'
                 : showWalletConnectView
-                ? 'WalletConnect Mobile'
+                ? 'Mobile Wallet Launcher'
                 : 'Connect a wallet'}
             </h2>
           </div>
@@ -301,65 +351,109 @@ export function WalletModal() {
         ) : showWalletConnectView ? (
           <div className="mt-5 space-y-3">
             <p className="text-xs leading-relaxed text-slate-400">
-              Launch TataSwap directly inside your mobile wallet&apos;s built-in DApp browser on BNB Smart Chain for one-tap signing without browser extensions.
+              Tap your wallet below to open TataSwap inside that wallet&apos;s built-in DApp browser on BNB Smart Chain. Once opened inside the wallet app, TataSwap connects automatically.
             </p>
             <a
-              href={`https://link.trustwallet.com/open_url?coin_id=20000714&url=${encodeURIComponent(
-                currentUrl
-              )}`}
+              href={getDeepLink('trustwallet')}
               target="_blank"
-              rel="noreferrer"
+              rel="noopener noreferrer"
               className="flex items-center justify-between rounded-xl border border-white/10 bg-[#161C2C] px-4 py-3 hover:border-emerald-500/40"
             >
               <div className="flex items-center gap-3">
                 <WalletIcon type="trustwallet" />
                 <div>
                   <div className="text-sm font-medium text-slate-100">Open in Trust Wallet App</div>
-                  <div className="text-xs text-slate-400">BNB Chain DApp Browser</div>
+                  <div className="text-xs text-slate-400">Launch Trust DApp Browser</div>
                 </div>
               </div>
-              <ExternalLink className="h-4 w-4 text-slate-400" />
+              <ExternalLink className="h-4 w-4 text-emerald-400" />
             </a>
             <a
-              href={`https://metamask.app.link/dapp/${currentUrl.replace(/^https?:\/\//, '')}`}
+              href={getDeepLink('metamask')}
               target="_blank"
-              rel="noreferrer"
+              rel="noopener noreferrer"
               className="flex items-center justify-between rounded-xl border border-white/10 bg-[#161C2C] px-4 py-3 hover:border-emerald-500/40"
             >
               <div className="flex items-center gap-3">
                 <WalletIcon type="metamask" />
                 <div>
                   <div className="text-sm font-medium text-slate-100">Open in MetaMask Mobile</div>
-                  <div className="text-xs text-slate-400">MetaMask DApp Browser</div>
+                  <div className="text-xs text-slate-400">Launch MetaMask DApp Browser</div>
                 </div>
               </div>
-              <ExternalLink className="h-4 w-4 text-slate-400" />
+              <ExternalLink className="h-4 w-4 text-emerald-400" />
             </a>
             <a
-              href={`https://go.cb-w.com/dapp?cb_url=${encodeURIComponent(currentUrl)}`}
+              href={getDeepLink('coinbase')}
               target="_blank"
-              rel="noreferrer"
+              rel="noopener noreferrer"
               className="flex items-center justify-between rounded-xl border border-white/10 bg-[#161C2C] px-4 py-3 hover:border-emerald-500/40"
             >
               <div className="flex items-center gap-3">
                 <WalletIcon type="coinbase" />
                 <div>
                   <div className="text-sm font-medium text-slate-100">Open in Coinbase Wallet</div>
-                  <div className="text-xs text-slate-400">Coinbase Mobile DApp Browser</div>
+                  <div className="text-xs text-slate-400">Launch Coinbase DApp Browser</div>
                 </div>
               </div>
-              <ExternalLink className="h-4 w-4 text-slate-400" />
+              <ExternalLink className="h-4 w-4 text-emerald-400" />
+            </a>
+            <a
+              href={getDeepLink('binance')}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center justify-between rounded-xl border border-white/10 bg-[#161C2C] px-4 py-3 hover:border-emerald-500/40"
+            >
+              <div className="flex items-center gap-3">
+                <WalletIcon type="binance" />
+                <div>
+                  <div className="text-sm font-medium text-slate-100">Open in Binance App</div>
+                  <div className="text-xs text-slate-400">Launch Binance Web3 Wallet</div>
+                </div>
+              </div>
+              <ExternalLink className="h-4 w-4 text-emerald-400" />
             </a>
           </div>
         ) : (
           <div className="mt-5 space-y-4">
+            {/* Helpful iframe / extension notice when browser extensions cannot inject into iframe */}
+            {isInIframe && !hasAnyInjected && (
+              <div className="rounded-xl border border-amber-500/30 bg-amber-500/[0.08] p-3.5 space-y-2.5 text-xs">
+                <div className="flex items-start gap-2 text-amber-300 font-medium">
+                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                  <span>
+                    Browser extensions (MetaMask, Trust Wallet) are blocked inside embedded preview iframes.
+                  </span>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <a
+                    href={currentUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-500 px-3 py-1.5 text-xs font-semibold text-slate-950 hover:bg-emerald-400"
+                  >
+                    <ExternalLink className="h-3.5 w-3.5" />
+                    Open in New Browser Tab
+                  </a>
+                  <button
+                    type="button"
+                    onClick={() => setShowWalletConnectView(true)}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-white/15 bg-[#161C2C] px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-white/5"
+                  >
+                    <Smartphone className="h-3.5 w-3.5" />
+                    Mobile Wallet Apps
+                  </button>
+                </div>
+              </div>
+            )}
+
             <div className="space-y-2">
               {walletOptions.map((item) => (
                 <button
                   key={item.type}
                   type="button"
                   disabled={isConnecting}
-                  onClick={item.onClick}
+                  onClick={() => handleOptionClick(item.type)}
                   className="flex w-full items-center justify-between rounded-xl border border-white/[0.08] bg-[#161C2C] px-3.5 py-3 text-left hover:border-emerald-500/45 hover:bg-[#1B2235] transition-colors disabled:opacity-50"
                 >
                   <div className="flex items-center gap-3 min-w-0">
@@ -372,15 +466,34 @@ export function WalletModal() {
                     </div>
                   </div>
                   <span className="text-xs font-medium text-emerald-400 whitespace-nowrap pl-2">
-                    Connect
+                    {item.detected ? 'Detected' : 'Connect'}
                   </span>
                 </button>
               ))}
             </div>
 
             {walletError && (
-              <div className="rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-300">
-                {walletError}
+              <div className="rounded-lg border border-red-500/30 bg-red-500/10 p-3 space-y-2 text-xs text-red-300">
+                <div>{walletError}</div>
+                <div className="flex flex-wrap gap-2 pt-1">
+                  <a
+                    href={currentUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1 rounded bg-white/10 px-2.5 py-1 text-slate-100 hover:bg-white/20"
+                  >
+                    <ExternalLink className="h-3 w-3" />
+                    Open in New Tab
+                  </a>
+                  <button
+                    type="button"
+                    onClick={() => setShowWalletConnectView(true)}
+                    className="inline-flex items-center gap-1 rounded bg-white/10 px-2.5 py-1 text-slate-100 hover:bg-white/20"
+                  >
+                    <Smartphone className="h-3 w-3" />
+                    Launch Mobile Wallet App
+                  </button>
+                </div>
               </div>
             )}
 

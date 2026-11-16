@@ -19,6 +19,7 @@ export interface DiscoveredProvider {
 
 interface Eip1193Provider {
   request: (args: { method: string; params?: unknown[] }) => Promise<unknown>;
+  enable?: () => Promise<string[]>;
   on?: (event: string, handler: (...args: unknown[]) => void) => void;
   removeListener?: (event: string, handler: (...args: unknown[]) => void) => void;
   isMetaMask?: boolean;
@@ -40,7 +41,10 @@ interface WalletContextValue {
   nativeBalance: string;
   isConnecting: boolean;
   walletError: string | null;
+  clearWalletError: () => void;
   discoveredProviders: DiscoveredProvider[];
+  isInIframe: boolean;
+  isMobileBrowser: boolean;
   connectWallet: (preferred?: WalletType, customProvider?: Eip1193Provider) => Promise<void>;
   disconnectWallet: () => void;
   switchNetwork: (chainId: number) => Promise<void>;
@@ -56,18 +60,35 @@ const WalletContext = createContext<WalletContextValue | null>(null);
 
 declare global {
   interface Window {
-    ethereum?: Eip1193Provider & { providers?: Eip1193Provider[] };
-    trustwallet?: Eip1193Provider;
+    ethereum?: Eip1193Provider & {
+      providers?: Eip1193Provider[];
+      selectedProvider?: Eip1193Provider;
+    };
+    trustwallet?: Eip1193Provider & { ethereum?: Eip1193Provider };
     BinanceChain?: Eip1193Provider;
+    binancew3w?: { ethereum?: Eip1193Provider };
     coinbaseWalletExtension?: Eip1193Provider;
   }
+}
+
+function classifyProvider(p: Eip1193Provider): { type: WalletType; name: string } {
+  if (p.isTrust || p.isTrustWallet) {
+    return { type: 'trustwallet', name: 'Trust Wallet' };
+  }
+  if (p.isCoinbaseWallet) {
+    return { type: 'coinbase', name: 'Coinbase Wallet' };
+  }
+  if (p.isBinance) {
+    return { type: 'binance', name: 'Binance Wallet' };
+  }
+  return { type: 'metamask', name: 'MetaMask / Web3 Wallet' };
 }
 
 export function WalletProvider({ children }: { children: React.ReactNode }) {
   const [account, setAccount] = useState<string | null>(null);
   const [walletType, setWalletType] = useState<WalletType | null>(null);
   const [walletChainId, setWalletChainId] = useState<number | null>(null);
-  const [selectedChainId, setSelectedChainId] = useState<number>(97); // Default BNB Smart Chain Testnet
+  const [selectedChainId, setSelectedChainId] = useState<number>(97);
   const [networks, setNetworks] = useState<NetworkConfig[]>([]);
   const [nativeBalance, setNativeBalance] = useState<string>('0');
   const [isConnecting, setIsConnecting] = useState(false);
@@ -75,6 +96,20 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
   const [activeEip1193, setActiveEip1193] = useState<Eip1193Provider | null>(null);
   const [discoveredProviders, setDiscoveredProviders] = useState<DiscoveredProvider[]>([]);
   const [walletModalOpen, setWalletModalOpen] = useState(false);
+
+  const isInIframe =
+    typeof window !== 'undefined' &&
+    (() => {
+      try {
+        return window.self !== window.top;
+      } catch {
+        return true;
+      }
+    })();
+
+  const isMobileBrowser =
+    typeof navigator !== 'undefined' &&
+    /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
 
   const activeNetwork =
     networks.find((n) => n.chainId === selectedChainId) || networks[0] || null;
@@ -96,71 +131,39 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     refreshNetworks();
   }, [refreshNetworks]);
 
-  // EIP-6963 multi-wallet discovery + injected wallet detection
-  useEffect(() => {
+  const scanInjectedProviders = useCallback(() => {
     const found: DiscoveredProvider[] = [];
-    const onAnnounce = (event: Event) => {
-      const custom = event as CustomEvent<{
-        info: { uuid: string; name: string; rdns: string };
-        provider: Eip1193Provider;
-      }>;
-      const { info, provider } = custom.detail;
-      const lowerName = info.name.toLowerCase();
-      const lowerRdns = (info.rdns || '').toLowerCase();
-      let type: WalletType = 'metamask';
-      if (lowerName.includes('trust') || lowerRdns.includes('trust')) {
-        type = 'trustwallet';
-      } else if (lowerName.includes('coinbase') || lowerRdns.includes('coinbase')) {
-        type = 'coinbase';
-      } else if (lowerName.includes('binance') || lowerRdns.includes('binance')) {
-        type = 'binance';
-      }
-      setDiscoveredProviders((prev) => {
-        if (prev.some((p) => p.id === info.uuid)) return prev;
-        return [...prev, { id: info.uuid, name: info.name, type, provider }];
-      });
-    };
-
-    window.addEventListener('eip6963:announceProvider', onAnnounce);
-    window.dispatchEvent(new Event('eip6963:requestProvider'));
 
     if (window.ethereum) {
-      const providers = Array.isArray(window.ethereum.providers)
+      const rawList = Array.isArray(window.ethereum.providers)
         ? window.ethereum.providers
         : [window.ethereum];
-      providers.forEach((p, idx) => {
-        const isTrust = Boolean(p.isTrust || p.isTrustWallet);
-        const isCoinbase = Boolean(p.isCoinbaseWallet);
-        const isBinance = Boolean(p.isBinance);
-        let type: WalletType = 'metamask';
-        let name = 'MetaMask / Injected Web3';
-        if (isTrust) {
-          type = 'trustwallet';
-          name = 'Trust Wallet';
-        } else if (isCoinbase) {
-          type = 'coinbase';
-          name = 'Coinbase Wallet';
-        } else if (isBinance) {
-          type = 'binance';
-          name = 'Binance Wallet';
-        }
+      rawList.forEach((p, idx) => {
+        if (!p || typeof p.request !== 'function') return;
+        const { type, name } = classifyProvider(p);
         found.push({
-          id: `injected-${idx}`,
+          id: `injected-${idx}-${type}`,
           name,
           type,
           provider: p,
         });
       });
     }
-    if (window.trustwallet) {
+
+    const trustProv = window.trustwallet?.ethereum || window.trustwallet;
+    if (trustProv && typeof trustProv.request === 'function') {
       found.push({
         id: 'window-trustwallet',
         name: 'Trust Wallet',
         type: 'trustwallet',
-        provider: window.trustwallet,
+        provider: trustProv,
       });
     }
-    if (window.coinbaseWalletExtension) {
+
+    if (
+      window.coinbaseWalletExtension &&
+      typeof window.coinbaseWalletExtension.request === 'function'
+    ) {
       found.push({
         id: 'window-coinbase',
         name: 'Coinbase Wallet',
@@ -168,14 +171,17 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
         provider: window.coinbaseWalletExtension,
       });
     }
-    if (window.BinanceChain) {
+
+    const binanceProv = window.binancew3w?.ethereum || window.BinanceChain;
+    if (binanceProv && typeof binanceProv.request === 'function') {
       found.push({
         id: 'window-binance',
         name: 'Binance Wallet',
         type: 'binance',
-        provider: window.BinanceChain,
+        provider: binanceProv,
       });
     }
+
     if (found.length > 0) {
       setDiscoveredProviders((prev) => {
         const merged = [...prev];
@@ -188,10 +194,91 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       });
     }
 
-    return () => {
-      window.removeEventListener('eip6963:announceProvider', onAnnounce);
-    };
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new Event('eip6963:requestProvider'));
+    }
   }, []);
+
+  // EIP-6963 multi-wallet discovery + asynchronous mobile ethereum#initialized listener
+  useEffect(() => {
+    const onAnnounce = (event: Event) => {
+      const custom = event as CustomEvent<{
+        info: { uuid: string; name: string; rdns: string };
+        provider: Eip1193Provider;
+      }>;
+      const { info, provider } = custom.detail;
+      if (!provider || typeof provider.request !== 'function') return;
+      const lowerName = (info.name || '').toLowerCase();
+      const lowerRdns = (info.rdns || '').toLowerCase();
+      let type: WalletType = 'metamask';
+      if (lowerName.includes('trust') || lowerRdns.includes('trust')) {
+        type = 'trustwallet';
+      } else if (lowerName.includes('coinbase') || lowerRdns.includes('coinbase')) {
+        type = 'coinbase';
+      } else if (lowerName.includes('binance') || lowerRdns.includes('binance')) {
+        type = 'binance';
+      }
+      setDiscoveredProviders((prev) => {
+        if (prev.some((p) => p.id === info.uuid || p.provider === provider)) return prev;
+        return [...prev, { id: info.uuid, name: info.name, type, provider }];
+      });
+    };
+
+    const onEthInit = () => scanInjectedProviders();
+
+    window.addEventListener('eip6963:announceProvider', onAnnounce);
+    window.addEventListener('ethereum#initialized', onEthInit);
+    scanInjectedProviders();
+
+    const retryTimer = setTimeout(scanInjectedProviders, 600);
+
+    return () => {
+      clearTimeout(retryTimer);
+      window.removeEventListener('eip6963:announceProvider', onAnnounce);
+      window.removeEventListener('ethereum#initialized', onEthInit);
+    };
+  }, [scanInjectedProviders]);
+
+  // Re-scan whenever wallet modal opens
+  useEffect(() => {
+    if (walletModalOpen) {
+      scanInjectedProviders();
+    }
+  }, [walletModalOpen, scanInjectedProviders]);
+
+  // Silent eth_accounts check for already-authorized DApp browser sessions
+  useEffect(() => {
+    if (account || discoveredProviders.length === 0) return;
+    let cancelled = false;
+    async function checkExistingSession() {
+      for (const entry of discoveredProviders) {
+        try {
+          const accs = (await entry.provider.request({
+            method: 'eth_accounts',
+          })) as string[];
+          if (!cancelled && Array.isArray(accs) && accs.length > 0) {
+            const chainHex = (await entry.provider.request({
+              method: 'eth_chainId',
+            })) as string;
+            const parsedChain = Number.parseInt(chainHex, 16);
+            setActiveEip1193(entry.provider);
+            setAccount(accs[0]);
+            setWalletType(entry.type);
+            if (!Number.isNaN(parsedChain)) {
+              setWalletChainId(parsedChain);
+            }
+            break;
+          }
+        } catch {
+          // Ignore providers that do not respond to silent check
+        }
+      }
+    }
+    checkExistingSession();
+    return () => {
+      cancelled = true;
+    };
+  }, [account, discoveredProviders]);
 
   const getReadProvider = useCallback(
     (chainId?: number): JsonRpcProvider | null => {
@@ -236,7 +323,9 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     };
     const handleChainChanged = (chainHex: unknown) => {
       if (typeof chainHex === 'string') {
-        const parsed = Number.parseInt(chainHex, 16);
+        const parsed = chainHex.startsWith('0x')
+          ? Number.parseInt(chainHex, 16)
+          : Number.parseInt(chainHex, 10);
         if (!Number.isNaN(parsed)) {
           setWalletChainId(parsed);
           if (networks.some((n) => n.chainId === parsed)) {
@@ -260,11 +349,26 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
   ) => {
     setWalletError(null);
     setIsConnecting(true);
+    scanInjectedProviders();
+
     try {
       let targetProvider = customProvider;
+
       if (!targetProvider) {
         const matched = discoveredProviders.find((p) => p.type === preferred);
-        targetProvider = matched?.provider || window.ethereum;
+        if (matched) {
+          targetProvider = matched.provider;
+        } else if (preferred === 'trustwallet') {
+          targetProvider =
+            window.trustwallet?.ethereum || window.trustwallet || window.ethereum;
+        } else if (preferred === 'binance') {
+          targetProvider =
+            window.binancew3w?.ethereum || window.BinanceChain || window.ethereum;
+        } else if (preferred === 'coinbase') {
+          targetProvider = window.coinbaseWalletExtension || window.ethereum;
+        } else {
+          targetProvider = window.ethereum || discoveredProviders[0]?.provider;
+        }
       }
 
       if (!targetProvider) {
@@ -275,23 +379,54 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
           binance: 'Binance Wallet',
           walletconnect: 'WalletConnect',
         };
+        if (isInIframe) {
+          throw new Error(
+            `${labelMap[preferred]} extension cannot inject into an embedded preview frame. Click "Open in New Tab" below to connect your browser extension, or use Mobile DApp Links.`
+          );
+        }
         throw new Error(
-          `${labelMap[preferred]} extension or DApp browser was not detected. Install the ${labelMap[preferred]} extension or open TataSwap inside your mobile wallet via WalletConnect.`
+          `${labelMap[preferred]} was not detected in this browser. Use the Mobile Wallet Launch links below to open TataSwap directly inside ${labelMap[preferred]}'s DApp browser.`
         );
       }
 
-      const accounts = (await targetProvider.request({
-        method: 'eth_requestAccounts',
-      })) as string[];
-
-      if (!accounts || accounts.length === 0) {
-        throw new Error('Wallet connection rejected or returned no accounts.');
+      let accounts: string[] = [];
+      try {
+        accounts = (await targetProvider.request({
+          method: 'eth_requestAccounts',
+        })) as string[];
+      } catch (reqErr: unknown) {
+        const code = (reqErr as { code?: number })?.code;
+        if (code === -32002) {
+          throw new Error(
+            'A wallet connection popup is already pending. Open your wallet extension and approve the connection.'
+          );
+        }
+        if (code === 4001) {
+          throw new Error('Connection request was rejected in your wallet.');
+        }
+        if (typeof targetProvider.enable === 'function') {
+          accounts = await targetProvider.enable();
+        } else {
+          throw reqErr;
+        }
       }
 
-      const chainHex = (await targetProvider.request({
-        method: 'eth_chainId',
-      })) as string;
-      const currentChain = Number.parseInt(chainHex, 16);
+      if (!accounts || accounts.length === 0) {
+        throw new Error('Wallet returned no accounts.');
+      }
+
+      let currentChain = selectedChainId;
+      try {
+        const chainHex = (await targetProvider.request({
+          method: 'eth_chainId',
+        })) as string;
+        const parsed = chainHex.startsWith('0x')
+          ? Number.parseInt(chainHex, 16)
+          : Number.parseInt(chainHex, 10);
+        if (!Number.isNaN(parsed)) currentChain = parsed;
+      } catch {
+        // Fallback to active selectedChainId
+      }
 
       setActiveEip1193(targetProvider);
       setAccount(accounts[0]);
@@ -405,7 +540,10 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
         nativeBalance,
         isConnecting,
         walletError,
+        clearWalletError: () => setWalletError(null),
         discoveredProviders,
+        isInIframe,
+        isMobileBrowser,
         connectWallet,
         disconnectWallet,
         switchNetwork,
